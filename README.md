@@ -88,9 +88,28 @@ python signin.py all      # 查签到状态 + 领取（调试）
 
 ---
 
-## ⏰ 每日定时（00:05）
+## ⏰ 每日定时
 
-推荐用 **WorkBuddy 定时自动化**。本脚本依赖本机桌面端登录态，云端 CI（如 GitHub Actions）跑不了。
+本脚本依赖**本机桌面端登录态**，云端 CI（如 GitHub Actions）跑不了，推荐在**本机**配置定时任务。
+
+### 方式一：Windows 任务计划（推荐，纯本地无人值守）
+
+仓库内置一键脚本，把 `python signin.py auto` 注册成 Windows 任务计划，每天定时自动跑：
+
+- 安装（默认每天 **00:05**）：`install-schedule.bat`
+- 自定义时间（24 小时制）：`install-schedule.bat 09:30`
+- 卸载：`uninstall-schedule.bat`
+- 手动跑一次（测试用，非交互）：`run-once.bat`
+
+脚本会自动用 `schtasks` 注册名为 `WorkBuddyAutoSignin` 的任务，调用 `scheduled-run.bat`：
+解析 Python 绝对路径（任务计划环境可能没 PATH）→ 运行 `signin.py auto` → 把结果写日志并可选推送。
+
+> [!TIP]
+> 脚本已自动解析 Python 路径并写进任务命令，避免计划任务找不到 Python。
+> 如需把签到结果推送到飞书群机器人，设置环境变量后自动生效（无需改脚本）：
+> `setx WORKBUDDY_FEISHU_WEBHOOK "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`
+
+### 方式二：WorkBuddy 定时自动化
 
 1. 把 `signin.py` 放到固定位置，例如 `<工作区>/.workbuddy/automations/daily-signin/signin.py`
 2. 新建 WorkBuddy 自动化：
@@ -141,6 +160,24 @@ python signin.py all      # 查签到状态 + 领取（调试）
 > 本项目为**非官方**工具，与腾讯或 WorkBuddy 无任何隶属关系。签到接口系从桌面端 `app.asar` 逆向得到。使用风险自负；接口可能随时变动且不另行通知。请遵守相关服务条款。
 
 ---
+
+## 📁 项目结构
+
+```text
+workbuddy-auto-signin/
+├── signin.py                  # 签到主脚本（纯标准库，auto/growth/status/claim/all）
+├── install-schedule.bat      # 一键注册"每日自动签到"Windows 任务计划
+├── scheduled-run.bat         # 非交互运行器：供任务计划调用（解析 Python 路径→运行→落日志→可选推送）
+├── uninstall-schedule.bat    # 删除"每日自动签到"任务计划
+├── run-once.bat              # 手动跑一次（测试用，非交互）
+├── scripts/
+│   └── notify.ps1            # 把签到结果推送到飞书群机器人（WORKBUDDY_FEISHU_WEBHOOK）
+├── README.md
+├── LICENSE
+└── CHANGELOG.md
+```
+
+> 任务计划任务名固定为 `WorkBuddyAutoSignin`；`.bat` 均为 ASCII + CRLF（无 BOM），中文提示统一走 PowerShell，避免 GBK 代码页误解析。
 
 ## 📄 协议
 
