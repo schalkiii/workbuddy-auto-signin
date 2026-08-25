@@ -20,12 +20,18 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
   python signin.py status   # 仅查签到状态（调试）
   python signin.py claim    # 仅领取签到（调试，幂等）
   python signin.py all      # 查签到状态 + 领取（调试）
+  python signin.py auto --no-push   # 本地测试：跑完整流程但不推送飞书（也支持环境变量 WORKBUDDY_NO_PUSH=1）
+
+配置：endpoint / authFile / feishuWebhook 可写入 <项目根>/config.json；优先级
+      环境变量 > config.json > 内置默认。详见 README。
 """
 
 import json
 import os
 import ssl
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -33,8 +39,13 @@ DEFAULT_ENDPOINT = "https://copilot.tencent.com"
 AUTH_BASENAME = os.path.join("CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
 
 
-def find_auth_file():
-    """按平台探测 WorkBuddy 桌面端写出的登录凭据文件，支持环境变量覆盖。"""
+def find_auth_file(override=None):
+    """按平台探测 WorkBuddy 桌面端写出的登录凭据文件，支持 config / 环境变量覆盖。
+
+    优先级：参数 override (config.json authFile) > WORKBUDDY_AUTH_FILE 环境变量 > 自动探测。
+    """
+    if override:
+        return override
     override = os.environ.get("WORKBUDDY_AUTH_FILE")
     if override:
         return override
@@ -50,6 +61,85 @@ def find_auth_file():
         if os.path.exists(c):
             return c
     return None
+
+
+def load_config():
+    """加载 config.json（配置优先级：环境变量 > config.json > 内置默认）。
+
+    路径：WORKBUDDY_CONFIG 环境变量 > <signin.py 所在目录>/config.json。
+    文件缺失或非法时返回 {}，不影响运行。
+    """
+    cfg_path = os.environ.get("WORKBUDDY_CONFIG")
+    if not cfg_path:
+        root = os.path.dirname(os.path.abspath(__file__))
+        cfg_path = os.path.join(root, "config.json")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def push_feishu(text, webhook, timeout=10):
+    """把签到结果推送到飞书群机器人 webhook。推送失败仅告警，不影响退出码。
+
+    主通道 urllib（OpenSSL，自动走系统代理）；失败时回退 curl --ssl-no-revoke
+    （本环境经实战验证可用，规避 Windows schannel 证书吊销离线握手失败）。
+    """
+    if not webhook or not text:
+        return False
+    payload = {
+        "msg_type": "text",
+        "content": {"text": "WorkBuddy 签到：" + text},
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    # 1) urllib 主通道
+    try:
+        req = urllib.request.Request(
+            webhook, data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            try:
+                if json.loads(raw).get("code") == 0:
+                    print("[OK] Feishu notification sent")
+                    return True
+            except Exception:
+                pass
+            raise RuntimeError("Feishu responded: " + raw[:200])
+    except Exception as e:
+        print("[WARN] urllib push failed (%s), trying curl..." % e)
+
+    # 2) curl 回退
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".json", prefix="wb_signin_")
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+        try:
+            r = subprocess.run(
+                ["curl", "-sS", "--ssl-no-revoke",
+                 "-H", "Content-Type: application/json", "-d", "@" + tmp, webhook],
+                capture_output=True, text=True, timeout=timeout + 5,
+            )
+            out = (r.stdout or "").strip()
+            try:
+                if r.returncode == 0 and json.loads(out).get("code") == 0:
+                    print("[OK] Feishu notification sent (curl)")
+                    return True
+            except Exception:
+                pass
+            raise RuntimeError("curl rc=%s %s" % (r.returncode, out[:200]))
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+    except Exception as e:
+        print("[WARN] Feishu push failed: %s" % e)
+        return False
 
 
 def load_session(auth_file):
@@ -337,9 +427,13 @@ def run_auto(headers, endpoint):
 
 
 def main():
-    action = sys.argv[1] if len(sys.argv) > 1 else "auto"
+    action = sys.argv[1] if (len(sys.argv) > 1 and not sys.argv[1].startswith("--")) else "auto"
+    no_push = "--no-push" in sys.argv or bool(os.environ.get("WORKBUDDY_NO_PUSH"))
 
-    auth_file = find_auth_file()
+    cfg = load_config()
+    webhook = os.environ.get("WORKBUDDY_FEISHU_WEBHOOK") or cfg.get("feishuWebhook")
+
+    auth_file = find_auth_file(cfg.get("authFile"))
     if not auth_file or not os.path.exists(auth_file):
         home = os.path.expanduser("~")
         guesses = [
@@ -349,7 +443,7 @@ def main():
         out = {
             "result": "NO_AUTH",
             "report": "未找到 WorkBuddy 登录凭据。请先在本机登录 WorkBuddy 桌面端；"
-                      "或设置环境变量 WORKBUDDY_AUTH_FILE 指向 workbuddy-desktop.info。",
+                      "或设置环境变量 WORKBUDDY_AUTH_FILE / config.json authFile 指向 workbuddy-desktop.info。",
             "looked_in": guesses,
         }
         print(json.dumps(out, ensure_ascii=False))
@@ -357,7 +451,10 @@ def main():
 
     session = load_session(auth_file)
     headers = build_headers(session)
-    endpoint = ((session.get("auth") or {}).get("endpoint") or DEFAULT_ENDPOINT).rstrip("/")
+    endpoint = (os.environ.get("WORKBUDDY_ENDPOINT")
+                or cfg.get("endpoint")
+                or (session.get("auth") or {}).get("endpoint")
+                or DEFAULT_ENDPOINT).rstrip("/")
 
     if action == "auto":
         code, out = run_auto(headers, endpoint)
@@ -367,11 +464,15 @@ def main():
         if gout.get("credits_gained"):
             out["report"] += "；" + gout["report"]
         print(json.dumps(out, ensure_ascii=False))
+        if not no_push and webhook:
+            push_feishu(out.get("report", ""), webhook)
         return code
 
     if action == "growth":
         code, out = run_growth(headers, endpoint)
         print(json.dumps(out, ensure_ascii=False))
+        if not no_push and webhook:
+            push_feishu(out.get("report", ""), webhook)
         return code
 
     if action in ("status", "all"):

@@ -2,8 +2,10 @@
 chcp 65001 >nul
 rem ============================================================
 rem Non-interactive check-in runner for Task Scheduler.
-rem Resolves python, runs python signin.py auto, and writes the
-rem result to a log file. No pause; safe for scheduled runs.
+rem Resolves python, runs python signin.py auto, writes the result
+rem to a log file, and (if configured) pushes the result to a Feishu
+rem (Lark) webhook. The webhook is read by signin.py from config.json
+rem (or WORKBUDDY_FEISHU_WEBHOOK env). No pause; safe for scheduled runs.
 rem ============================================================
 
 set "PROJECT_DIR=%~dp0"
@@ -35,5 +37,6 @@ set "RC=%errorlevel%"
 echo [INFO] Exit code: %RC%
 type "%LOG%"
 
+rem Feishu push is handled inside signin.py (reads config.json / WORKBUDDY_FEISHU_WEBHOOK).
 exit /b %RC%
 rem ============================================================
