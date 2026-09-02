@@ -5,6 +5,6 @@ __pycache__/
 
 # WorkBuddy local workspace data (contains credentials / memory / automation config)
 .workbuddy/
-
 # Local config with private webhook (keep out of git; see config.example.json)
 config.json
+signin.log

@@ -16,6 +16,7 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
 
 用法：
   python signin.py auto     # 每日自动化：签到 + 成长中心（领旅行礼物/派Buddy/开盲盒/领任务奖）
+  python signin.py silent   # 同 auto，但结果写日志文件而非 stdout（配合 pythonw.exe 静默运行）
   python signin.py growth   # 仅成长中心（不签到）
   python signin.py status   # 仅查签到状态（调试）
   python signin.py claim    # 仅领取签到（调试，幂等）
@@ -34,6 +35,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 DEFAULT_ENDPOINT = "https://copilot.tencent.com"
 AUTH_BASENAME = os.path.join("CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
@@ -153,7 +155,7 @@ def build_headers(session):
     token = auth.get("accessToken")
     uid = account.get("uid")
     if not token or not uid:
-        raise SystemExit("NO_SESSION: 本地未找到有效登录会话")
+        raise ValueError("NO_SESSION: 本地未找到有效登录会话")
     headers = {
         "Accept": "application/json",
         "Authorization": "Bearer %s" % token,
@@ -188,6 +190,10 @@ def _request(url, headers, method="GET", payload=None):
             return e.code, json.loads(raw)
         except Exception:
             return e.code, {"raw": raw[:500]}
+    except urllib.error.URLError as e:
+        return -1, {"error": str(e.reason)}
+    except Exception as e:
+        return -1, {"error": str(e)}
 
 
 def post(url, headers, payload=None):
@@ -271,7 +277,6 @@ def run_growth(headers, endpoint):
                    "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
     if travel == "arrived":
         record_id = dig(sbody, "record_id")
-        reward = dig(sbody, "reward_credit") or 0
         ccode, cbody = post(base + "/buddy/travel/claim", headers, {"record_id": record_id})
         if 200 <= ccode < 300 and dig(cbody, "reward_credit") is not None:
             got = dig(cbody, "reward_credit")
@@ -450,20 +455,34 @@ def main():
         return 2
 
     session = load_session(auth_file)
-    headers = build_headers(session)
+    try:
+        headers = build_headers(session)
+    except ValueError as e:
+        out = {"result": "NO_SESSION", "report": str(e)}
+        print(json.dumps(out, ensure_ascii=False))
+        return 1
     endpoint = (os.environ.get("WORKBUDDY_ENDPOINT")
                 or cfg.get("endpoint")
                 or (session.get("auth") or {}).get("endpoint")
                 or DEFAULT_ENDPOINT).rstrip("/")
 
-    if action == "auto":
+    if action in ("auto", "silent"):
         code, out = run_auto(headers, endpoint)
         # 签到后顺带跑成长中心
         gcode, gout = run_growth(headers, endpoint)
         out["growth"] = gout.get("report")
         if gout.get("credits_gained"):
             out["report"] += "；" + gout["report"]
-        print(json.dumps(out, ensure_ascii=False))
+        if action == "silent":
+            # 写日志文件（配合 pythonw.exe 无窗口运行，不输出 stdout）
+            log_path = os.environ.get("WORKBUDDY_SIGNIN_LOG")
+            if not log_path:
+                log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signin.log")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write("[%s] %s\n" % (ts, json.dumps(out, ensure_ascii=False)))
+        else:
+            print(json.dumps(out, ensure_ascii=False))
         if not no_push and webhook:
             push_feishu(out.get("report", ""), webhook)
         return code
