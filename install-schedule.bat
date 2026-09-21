@@ -17,24 +17,20 @@ if not "%1"=="" set "TIME=%1"
 set "PROJECT_DIR=%~dp0"
 set "RUNNER=%PROJECT_DIR%scheduled-run.bat"
 
-rem Resolve python absolute path (scheduler env may lack python in PATH)
-set "PY_EXE=python"
-for /f "delims=" %%i in ('where python 2^>nul') do (
-  set "PY_EXE=%%i"
-  goto :found_python
-)
-:found_python
-if "%PY_EXE%"=="python" (
-  for /f "delims=" %%i in ('where python3 2^>nul') do (
-    set "PY_EXE=%%i"
-    goto :found_python3
-  )
-)
-:found_python3
-if "%PY_EXE%"=="python" (
-  echo [ERROR] Python not found. Please install Python 3 and add it to PATH.
-  exit /b 1
-)
+rem Resolve python absolute path (scheduler env may lack python in PATH).
+rem Skip the WindowsApps Store stub (0-byte shim that exists on PATH but
+rem fails every run with exit code 9009), fall back to python3, then to
+rem the per-user install folder.
+set "PY_EXE="
+for /f "delims=" %%i in ('where python 2^>nul ^| findstr /v /i "WindowsApps"') do if not defined PY_EXE set "PY_EXE=%%i"
+if defined PY_EXE goto :python_ok
+for /f "delims=" %%i in ('where python3 2^>nul ^| findstr /v /i "WindowsApps"') do if not defined PY_EXE set "PY_EXE=%%i"
+if defined PY_EXE goto :python_ok
+for /f "delims=" %%i in ('dir /b /s "%LOCALAPPDATA%\Programs\Python\python.exe" 2^>nul') do if not defined PY_EXE set "PY_EXE=%%i"
+if defined PY_EXE goto :python_ok
+echo [ERROR] Python not found in PATH.
+exit /b 1
+:python_ok
 
 rem Remove existing task first to avoid duplicate-registration errors
 schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>nul
