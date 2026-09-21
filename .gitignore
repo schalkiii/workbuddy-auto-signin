@@ -7,4 +7,6 @@ __pycache__/
 .workbuddy/
 # Local config with private webhook (keep out of git; see config.example.json)
 config.json
+# CodeBuddy/IDE working memory (cross-session notes, not for repo)
+.codebuddy/
 signin.log
