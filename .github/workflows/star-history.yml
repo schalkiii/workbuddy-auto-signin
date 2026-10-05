@@ -13,7 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: carsteneu/mystarhistory@v1
+      - uses: keeptinkering/star-history-action@v1.0.6
         with:
+          # GITHUB_TOKEN 由 Actions 自动提供，无需在 fork 配置任何 secret。
+          # （2026-06-30 起 GitHub 限制 stargazers API，需 repo 自身 token 才能读取。）
+          token: ${{ secrets.GITHUB_TOKEN }}
           repos: ${{ github.repository }}
-          token: ${{ secrets.STAR_HISTORY_TOKEN }}
+          output-dir: assets/star-history
+          # 不改动 README，只生成图表文件到 assets/star-history/。
+          update-readme: 'false'
