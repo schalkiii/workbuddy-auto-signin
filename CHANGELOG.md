@@ -15,6 +15,7 @@
 - 新增本 `CHANGELOG.md`。
 
 ### Changed
+- CI：`Tests` workflow 矩阵移除 `macos-latest` 的两个 job。macOS arm64 hosted runner 容量不足时 job 会一直排队，15 分钟后被 GitHub 取消（`The job was not acquired by Runner of type hosted`），使整次 run 误判为失败；macOS 专属用例（`tests/test_qoder_macos*.py`）在非 macOS 上自动跳过，本地仍可完整验证。
 - 合并上游 `88lin/workbuddy-auto-signin`（至 `6339d70`）：引入 Qoder CN 每日 Credits 领取（`qoder_signin.py` 及 Windows / macOS 安装脚本）、Qoder macOS 登录态读取、Windows 注册表运行时探测、方括号安装路径与安装自检修复，并新增 `tests/` 测试套件。本 fork 的 `config.json` 外部化、飞书推送与 Windows `.bat` 调度脚本全部保留。
 
 ### Fixed

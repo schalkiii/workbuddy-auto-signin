@@ -17,7 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 不含 macOS：macOS arm64 hosted runner 长期容量不足，job 等待 15 分钟后
+        # 被 GitHub 直接取消（"not acquired by Runner"），导致整次 run 误判为失败。
+        os: [ubuntu-latest, windows-latest]
         python: ['3.10', '3.13']
     steps:
       - uses: actions/checkout@v4
