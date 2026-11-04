@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="assets/cover.jpg" alt="workbuddy-auto-signin —— WorkBuddy 自动签到脚本" width="100%">
+<img src="assets/cover.jpg" alt="workbuddy-auto-signin —— WorkBuddy / Qoder CN 自动领取脚本" width="100%">
 
 # 🤖 workbuddy-auto-signin
 
-**自动领取 WorkBuddy 每日签到积分的小脚本**
+**每天自动领取 WorkBuddy 签到积分 + Qoder CN 每日 100 Credits 的小脚本**
 
 [![版本](https://img.shields.io/github/v/release/88lin/workbuddy-auto-signin?style=flat&logo=github&logoColor=white&label=%E7%89%88%E6%9C%AC&color=1F6FEB)](https://github.com/88lin/workbuddy-auto-signin/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6?style=flat&logo=opensourceinitiative&logoColor=white)](LICENSE)
@@ -14,9 +14,11 @@
 
 </div>
 
-> 一个自包含的 Python 脚本，每天自动帮你领取 **WorkBuddy**（腾讯 AI 编程助手）的每日签到积分。只读取你自己机器上的登录态，零内置密钥，可安全分享。
+> 两个自包含的 Python 脚本，每天分别帮你领取 **WorkBuddy**（腾讯 AI 编程助手）的签到积分和 **Qoder CN** 的 100 通用 Credits。两者都只读取你自己机器上的登录态，零内置密钥，可安全分享。
 >
-> 👤 作者：[88lin](https://github.com/88lin) · 📦 仓库：[github.com/88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)
+> Qoder CN 是可选的独立功能，Windows 下可一键安装独立计划任务，不影响 WorkBuddy；详见[可选：Qoder CN](#qoder-cn)。
+>
+> 👤 作者：[88lin](https://dev.88lin.eu.org/) · 📦 仓库：[github.com/88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)
 
 > [!TIP]
 > **⭐ 顺手点个 Star 再往下看**——签到接口是从桌面端逆向来的，腾讯改一版它就可能失效，修复都会第一时间推到这里。Star 一下，等哪天连签莫名其妙断了，你能一秒翻回这个仓库。
@@ -45,6 +47,7 @@
 - ✅ 已安装并**登录过 WorkBuddy 桌面端**（登录后自动写出凭据文件，脚本靠它鉴权）；**Linux 没有**桌面端，登录过 [CodeBuddy CLI](https://www.codebuddy.cn) 即可，脚本会自动探测它的凭据
 - ✅ 本机有 **Python 3**（任意版本，无需任何第三方包）
 - ⬜ 可选：装了 `git` 就能直接 `clone`；没有的话去仓库页面 **Code → Download ZIP** 解压，效果一样
+- 🎁 可选：想顺便自动领 **Qoder CN** 的每日 100 Credits，需已登录 Qoder CN 桌面端；见[可选：Qoder CN](#qoder-cn)
 
 ---
 
@@ -139,6 +142,11 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 
 两个任务都零 Token、无窗口、关机错过后下次开机自动补跑。装完后终端会打印结果和下次运行时间。
 
+脚本仅在两个任务注册成功、且都能读取到任务和运行信息后显示「完成 / 两个定时任务已就位」。任一步失败都会报告出错阶段和任务名，并以退出码 `1` 结束；若已有部分任务注册成功，会列出并保留，解决问题后重跑即可更新同名任务。
+
+> [!TIP]
+> **注册时提示「拒绝访问 / 0x80070005」？** 使用登录 WorkBuddy 的**同一 Windows 账号**，以管理员身份打开 PowerShell，进入仓库目录后重跑安装命令。提权只用于安装，定时任务仍以该账号的普通权限运行。若设备策略禁止注册任务，请联系管理员，或使用上面的「模式 A：AI 自动化（跨平台）」；模式 A 无需 Windows 计划任务，但每次会消耗一次模型调用。
+
 > [!NOTE]
 > **为什么要两个任务**：签到一天一次就够了，成长中心却不是——Buddy 出去旅行 1~4 小时就带着礼物回来，礼物得手动领。只靠 00:05 那一次，礼物会压到第二天才到账；万一某天没跑成（关机），当天唯一的派出名额还会整个浪费掉。
 >
@@ -215,6 +223,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/workbuddy-auto-signin.pl
 > [!IMPORTANT]
 > **Buddy 旅行有每日名额限制**（服务端返回 `daily_limit_reached`），实测一天只能派出一次。轮询的作用是「及时把礼物领回来 + 补上当天错过的那次派出」，**不是**让你一天刷好几趟——脚本读到名额已用完会直接收手，不会去撞那堵墙。
 >
+> **先领礼物和任务奖励，再开 Buddy，最后派出旅行**。开 Buddy 可能覆盖旅行记录，因此仍在旅行、礼物未领成功或状态不明时会跳过开盒；确认空闲后先使用本轮积累的能量，再派出，每天只运行一次也能兼顾两者。派出时，尚未领养 Buddy 的已知业务拒绝只记为跳过，其他 401 / 403 仍会提醒。
+>
 > 轮询同时兼任**签到兜底**：每轮先查一次签到状态，未签就补上（两个系统都是如此，Windows 的 `silent-poll` 与 macOS 的 `auto` 行为一致）。所以「00:05 没跑成」不再等于「这天断签」。
 
 ---
@@ -260,11 +270,13 @@ python signin.py all            # 查签到状态 + 领取（调试）
 | 凭据来源 | 支持情况 |
 |---|---|
 | Windows / macOS 旧明文、Linux CodeBuddy CLI 明文 | 保留原路径，无需客户端解密运行时 |
-| Windows 新版字段加密 | 支持 `sym-v1 / suite 1`；5.6.2 已进行本机验证，其他版本按格式与运行时能力检测 |
+| Windows 新版字段加密 | 支持 `sym-v1 / suite 1`；5.6.2、5.7.3、5.8.3 已进行本机解密与只读认证验证，其他版本按格式与运行时能力检测 |
 | macOS 新版字段加密 | 已实现 `.app` 可执行文件发现及同一管道协议；尚待客户端实机验证 |
 | 其他加密格式或不具备原生存储接口的运行时 | 明确返回 `AUTH_ERROR`，不发送无效令牌 |
 
 客户端升级可能改变私有接口或格式。先运行 `python signin.py doctor` 检查本地能力，再运行只读的 `python signin.py status` 验证服务端认证；`doctor` 成功不表示解密或服务端认证已验证。
+
+Windows 按 `WORKBUDDY_EXE → 默认安装目录 → 注册表` 的顺序发现客户端。只有默认目录找不到时，才读取当前用户和本机的 32/64 位卸载注册条目，支持自定义安装目录、带空格或逗号的路径。注册表权限不足或条目失效会跳过；未登记的安装仍可用 `WORKBUDDY_EXE` 指定路径。注册表探测只读取信息，不修改注册表，也不执行卸载命令。
 
 签到流程：
 
@@ -274,8 +286,10 @@ python signin.py all            # 查签到状态 + 领取（调试）
 4. 🐱 **成长中心** 领旅行礼物 → 派 Buddy → 领取新任务（进度从领取才开始计）→ 领任务奖 → 断登自动补登（有补登卡时，每轮最多补一天）→ 连登奖励兑换 → 开盲盒 → 能量开 Buddy 盲盒
 5. 📤 **输出** 一行 JSON，`report` 字段是人话汇报
 
+补登只从服务端活跃日历中选择**当月、今天之前、活动上线之后且活跃分数为零**的日期，优先补最近的断点，每轮最多用一张卡。`makeup_dates` 是**已补登记录**，这些日期会被排除；日历缺失或格式异常时停止补登并提醒，不推测缺失日期的状态。规则与验证依据见[补登兼容说明](docs/plans/makeup-compatibility.md)。
+
 > [!NOTE]
-> 网络失败（GET 请求）自动重试 1 次；抽奖、领奖等写操作**不**重试，避免超时发生在服务端处理完成之后造成重复提交。两个签到接口例外——状态查询是只读的，领取接口本身幂等（当天重复领取只会返回「已签」，不会再发一次积分），故允许重试。整个运行受时间预算约束，详见「配置」。
+> 查询请求按网络错误或服务端 5xx 退避重试，次数受时间预算限制；补登、抽奖、领奖等写操作**不**重试，避免超时发生在服务端处理完成之后造成重复提交。两个签到接口例外——状态查询是只读的，领取接口本身幂等（当天重复领取只会返回「已签」，不会再发一次积分），故允许重试。整个运行受时间预算约束，详见「配置」。
 >
 > 所有请求都打到官方客户端用的同一个 endpoint（`https://copilot.tencent.com`）。签到接口系从桌面端 `app.asar` 逆向得到，仅供个人自动化使用。
 
@@ -322,12 +336,122 @@ python signin.py all            # 查签到状态 + 领取（调试）
 | `ERROR / 脚本运行异常（...）` | 异常不会静默丢失：`silent` 模式会写进 `signin.log`；可重跑 `python signin.py status` 看原始返回 |
 | 00:05 那次失败，连签却没断 | 正常——轮询任务（01/05/09/13/17/21 点）会先查状态，未签就补上。补签那轮日志会带 `"trigger": "poll"` |
 | 连登兑换「进阶」未解锁（连登天数不足） | 正常——三档分别要连登满 7 / 14 / 28 天，天数不够时服务端返回 403，脚本按常态处理，不记为失败 |
+| 旧日志反复出现 `date is not broken, no makeup needed` | 旧版误把已补登记录当作待补日期；更新脚本即可。新版从活跃日历选断点；查询后日期已被补上的情况按正常状态跳过 |
+| 查补登日历失败 / 补登模块异常 / 补登失败 | 本轮停止补登，失败原因写入 `report`，并返回非零退出码与 `needs_attention: true`；已领取的签到积分和其他奖励仍保留 |
 | `signin.log` 里查不到轮询记录 | 正常——空跑（已签过 / Buddy 还在路上 / 今日名额已用完）默认不落盘。想逐轮查看就设 `WORKBUDDY_GROWTH_LOG_EMPTY=1` |
 | 轮询任务一直显示「今日旅行名额已用完」 | 服务端每日只放行一次派出，当天已派过就会这样，属正常。第二天自动恢复 |
 | 调试原始返回 | `python signin.py status` 或 `python signin.py all` |
 
 > [!IMPORTANT]
-> 需要处理的结果会附 `needs_attention: true`；静默模式也会记录认证错误。`status` / `claim` / `all` 请求失败返回非零退出码，`all` 的状态查询失败时不会继续领取。
+> 需要处理的结果会附 `needs_attention: true`；静默模式也会记录认证错误。成长中心部分步骤成功不会掩盖其他步骤的硬失败，失败原因会同时进入 `report`。`status` / `claim` / `all` 请求失败返回非零退出码，`all` 的状态查询失败时不会继续领取。
+
+---
+
+<a id="qoder-cn"></a>
+
+## 🎁 可选：Qoder CN 每日 100 Credits
+
+同一个仓库还附带一个**独立**的 `qoder_signin.py`：自动领取 [Qoder CN](https://docs.qoder.cn/events/100credits) 个人用户每天 100 通用 Credits。它和 WorkBuddy 脚本、两个 WorkBuddy 定时任务互不影响，可以只装其中一个。
+
+活动规则（以官方页面为准）：
+
+- 每天 **10:00（UTC+8）** 刷新，每个窗口可领 **100 Credits**，领取后 **30 天**有效
+- 仅限个人用户；**没有补领**，错过当天窗口就没了
+- 领取接口幂等：同一窗口重复调用只返回已领取，不会多发
+
+### 前置条件
+
+- 已安装并**登录过 Qoder CN 桌面端**（Windows / macOS）
+- 本机有 **Python 3**（与 WorkBuddy 共用即可，无第三方包）
+
+> 自动读取登录态支持 **Windows** 与 **macOS**：
+>
+> - **Windows**：凭据由 DPAPI 保护，密钥从 `Local State` 解出，AES-256-GCM 解密。
+> - **macOS**：密钥在登录钥匙串（`Qoder CN App Safe Storage`），凭据是 AES-128-CBC。
+>   Python 标准库没有 AES，这一步交给客户端自带的 Electron 运行时（Node）完成，
+>   所以同样不需要 `pip install`。
+>
+> Linux 暂无自动读取，可设 `QODER_TOKEN`，但令牌会过期，不推荐长期保存。
+
+### 一键安装（Windows）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-qoder-windows.ps1
+```
+
+只创建一个任务，不碰 `WorkBuddyAutoSignin` / `WorkBuddyGrowthPoll`：
+
+| 任务 | 触发 | 干什么 |
+|---|---|---|
+| `QoderDailyCredits` | 每天 10:05 起，另加 11:05 / 15:05 / 19:05 / 23:05 | 查询并领取，静默写 `qoder_signin.log` |
+
+触发时间会按活动刷新时间（UTC+8 10:00）换算成本机时间；在国内时区就是上面这几个点。五次触发是为了兜住「10:05 时活动还没下发 / 刚开机网络没就绪」；领取本身幂等，已领过只会查询，不会重复领。
+
+> [!NOTE]
+> 脚本**不会**自动使用 refresh token 续期。这样不会和桌面端争抢刷新令牌轮换，代价是登录态过期后需要你打开一次 Qoder CN 桌面端。输出里的 `token_expires_at` 是当前令牌的到期时间；`AUTH_REJECTED` 就是提醒你重新登录。
+
+### 一键安装（macOS）
+
+```bash
+bash install-qoder-macos.sh
+```
+
+只创建一个 launchd 任务（`qoder-daily-credits`），不碰 WorkBuddy 的两个任务：
+
+| 任务 | 触发 | 干什么 |
+|---|---|---|
+| `qoder-daily-credits` | 每天 10:05，另加 11:05 / 15:05 / 19:05 / 23:05 | 查询并领取，每轮一行 JSON 写入 `~/Library/Logs/QoderDailyCredits/out.log` |
+
+安装脚本会先跑一次 `doctor` 自检（不联网、不领取），通过后才注册；注册失败会用备份自动回滚，不会把已有任务弄丢。
+自检会忽略终端里的临时 `QODER_TOKEN`，确认桌面登录态可用；自定义的 `QODER_EXE` / `QODER_AUTH_DIR` 会按安装时的当前目录展开为绝对路径，用于自检并保存到后台任务。
+
+> [!NOTE]
+> macOS 上首次读取登录态时，系统可能弹出钥匙串授权框（`Qoder CN App Safe Storage`）。选「始终允许」，否则后台任务会卡在等待授权。
+>
+> Python 解释器优先取 `/opt/homebrew/bin/python3` 或 `/usr/local/bin/python3`（Intel 机），找不到才用 `PATH` 里的；`/usr/bin/python3` 在没有 Xcode Command Line Tools 时只是占位壳，装了 launchd 任务会静默失败。要强制指定可用 `QODER_PYTHON=/path/to/python3 bash install-qoder-macos.sh`。
+
+### 手动运行 / 自检
+
+```bash
+python qoder_signin.py doctor          # 离线检查登录态和设备组件，不联网
+python qoder_signin.py status          # 只查活动列表，不领取
+python qoder_signin.py auto --dry-run  # 只报告会领到什么
+python qoder_signin.py auto            # 真的领取（幂等）
+```
+
+`doctor` / `status` / `auto` 都输出一行 JSON。领取成功时 `report` 形如 `成功领取 100 Credits（act-20261013-146，领取后 30 天有效）`；本窗口已领过则是 `本周期已领取 100 Credits（...）`。
+
+**日志**：默认写在脚本同目录的 `qoder_signin.log`。和 WorkBuddy 轮询一样，只有**真领到、活动异常或出错**才落盘；「已领过」「没有活动」不写。想连空跑也记录，设 `QODER_SIGNIN_LOG_EMPTY=1`。
+
+**卸载**：
+
+```powershell
+Unregister-ScheduledTask -TaskName "QoderDailyCredits" -Confirm:$false
+```
+
+macOS：
+
+```bash
+bash uninstall-qoder-macos.sh
+```
+
+### 配置
+
+| 环境变量 | 作用 |
+|---|---|
+| `QODER_AUTH_DIR` | 指定 Qoder CN 数据目录；Windows 默认扫描 `%APPDATA%\com.qodercn.app*`，macOS 默认扫描 `~/Library/Application Support/com.qodercn.app*` |
+| `QODER_TOKEN` | 手动提供 access token（Linux 或调试用；优先于本地登录态） |
+| `QODER_BASE_URL` | 覆盖 API 端点，默认 `https://openapi.qoder.com.cn` |
+| `QODER_EXE` | macOS：指定 Qoder CN 可执行文件（默认 `/Applications/Qoder CN.app`） |
+| `QODER_UMID_EXE` | 指定客户端自带的 `runtime-info.exe`（Windows；自动探测失败时） |
+| `QODER_SIGNIN_LOG` | `silent` 模式的日志路径（默认 `qoder_signin.log`） |
+| `QODER_SIGNIN_LOG_EMPTY=1` | 空跑也写日志 |
+
+> [!TIP]
+> 装完先跑一次 `python qoder_signin.py doctor` 和 `python qoder_signin.py status`：前者确认本机能解密登录态，后者确认服务端认证和活动下发正常。两者都不领取，可以放心重复执行。
+
+> [!WARNING]
+> Credits 领取接口同样是从桌面端行为推导的，服务端改一版就可能失效。脚本不含任何密钥，只读取运行者本机的 Qoder CN 登录态；不会打印 token，也不会改写登录态文件。使用风险自负，请遵守 Qoder 的服务条款。
 
 ---
 
@@ -379,6 +503,10 @@ python signin.py all            # 查签到状态 + 领取（调试）
 
 ## 📊 Star History
 
+<p align="center">
+<a href="https://trendshift.io/repositories/196490?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-196490" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/196490/daily?language=Python" alt="88lin%2Fworkbuddy-auto-signin | Trendshift" width="250" height="55"/></a>
+</p>
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/88lin/workbuddy-auto-signin/star-history/assets/my-star-history/star-history-dark.svg">
   <img alt="Star History" src="https://raw.githubusercontent.com/88lin/workbuddy-auto-signin/star-history/assets/my-star-history/star-history-light.svg">
@@ -396,4 +524,4 @@ python signin.py all            # 查签到状态 + 领取（调试）
 
 ## 📄 协议
 
-[MIT](LICENSE) © 2026 [88lin](https://github.com/88lin) · 仓库：[github.com/88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)
+[MIT](LICENSE) © 2026 [88lin](https://dev.88lin.eu.org/) · 仓库：[github.com/88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)

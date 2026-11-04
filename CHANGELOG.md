@@ -14,5 +14,9 @@
 - `README.md` 新增「Windows 任务计划」使用方式与项目结构说明。
 - 新增本 `CHANGELOG.md`。
 
+### Changed
+- 合并上游 `88lin/workbuddy-auto-signin`（至 `6339d70`）：引入 Qoder CN 每日 Credits 领取（`qoder_signin.py` 及 Windows / macOS 安装脚本）、Qoder macOS 登录态读取、Windows 注册表运行时探测、方括号安装路径与安装自检修复，并新增 `tests/` 测试套件。本 fork 的 `config.json` 外部化、飞书推送与 Windows `.bat` 调度脚本全部保留。
+
 ### Fixed
+- 同步上游成长中心修复：补登日期判断与失败提醒修正；改为先开 Buddy 再派出，避免旅行礼物被覆盖。
 - 修复三个调度脚本的 Python 解析：Windows 上 `where python` 常先命中 Microsoft Store 的 `WindowsApps\python.exe` 占位 stub（机器未装 Store 版 Python 时运行时直接失败，退出码 9009，且无窗口下表现为「无输出、看似成功」），导致任务计划每日签到实际从未执行过。现在跳过 `WindowsApps` 路径，依次回退 `python3` 与 `%LOCALAPPDATA%\Programs\Python` 下的真实安装（`run-once.bat` / `scheduled-run.bat` / `install-schedule.bat` 三处统一修复）。

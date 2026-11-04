@@ -36,6 +36,7 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
 import base64
 import json
 import math
+import ntpath
 import os
 import plistlib
 import re
@@ -49,7 +50,8 @@ import urllib.error
 import urllib.request
 import urllib.parse
 import uuid
-from datetime import datetime
+from contextlib import closing
+from datetime import date, datetime
 
 DEFAULT_ENDPOINT = "https://copilot.tencent.com"
 AUTH_BASENAME = os.path.join("CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
@@ -154,8 +156,7 @@ MAX_BUDGET_SECONDS = 540.0          # 签到任务 PT10M = 600s - 60s
 # 冷启动重试跑得完；但仍远小于 PT5M，跑不完就早收尾、四小时后再来。
 POLL_BUDGET_SECONDS = 180.0
 POLL_MAX_BUDGET_SECONDS = 240.0     # 轮询任务 PT5M = 300s - 60s
-# 每轮最多用掉几张补登卡。卡是稀缺资源（上限 4 张），而这条写路径还没被真实响应
-# 验证过，一轮只花一张：猜错形状也只错一次，一天 6 轮照样能把断登补完。
+# 每轮最多用掉一张补登卡；仅依据服务端活跃日历中明确的当月断登日期操作。
 MAKEUP_MAX_PER_RUN = 1
 REQUEST_TIMEOUT = 30
 # 网络类失败的退避节奏（秒）。定时任务最容易撞上的就是"刚开机/刚唤醒"：WiFi 重连、
@@ -399,6 +400,88 @@ def _mac_runtime(bundle):
         return None
 
 
+def _registry_text(registry, key, field):
+    """Read only string registry values; expand REG_EXPAND_SZ using Windows."""
+    try:
+        value, kind = registry.QueryValueEx(key, field)
+        if not isinstance(value, str) or kind not in (registry.REG_SZ, registry.REG_EXPAND_SZ):
+            return None
+        if kind == registry.REG_EXPAND_SZ:
+            value = registry.ExpandEnvironmentStrings(value)
+        return value
+    except OSError:
+        return None
+
+
+def _registry_runtime_path(value, icon=False):
+    """Parse a directory or DisplayIcon; never interpret an uninstall command."""
+    if not isinstance(value, str) or re.search(r"[\x00-\x1f\x7f]", value):
+        return None
+    value = value.strip()
+    if value.startswith('"'):
+        suffix = r"(?:\s*,\s*-?\d+)?" if icon else ""
+        match = re.fullmatch(r'"([^"]+)"' + suffix, value)
+        if not match:
+            return None
+        value = match[1]
+    elif '"' in value:
+        return None
+    elif icon:
+        # Only remove the trailing resource index; commas can belong to folders.
+        value = re.sub(r",\s*-?\d+$", "", value).rstrip()
+    if not ntpath.splitdrive(value)[0] or not ntpath.isabs(value):
+        return None
+    if not icon:
+        value = ntpath.join(value, "WorkBuddy.exe")
+    value = ntpath.normpath(value)
+    if ntpath.basename(value).casefold() != "workbuddy.exe":
+        return None
+    return value
+
+
+def _windows_registry_runtimes():
+    """Yield existing clients from user/machine uninstall entries, lazily.
+
+    Keep the import and all platform-specific constants inside this Windows-only
+    fallback so importing the script on macOS/Linux needs no winreg module.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+    except ImportError:
+        return
+    subkey = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    seen = set()
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ | view) as root:
+                    count = winreg.QueryInfoKey(root)[0]
+                    for index in range(count):
+                        try:
+                            with winreg.OpenKey(root, winreg.EnumKey(root, index),
+                                                0, winreg.KEY_READ | view) as entry:
+                                name = _registry_text(winreg, entry, "DisplayName")
+                                if not name or not re.fullmatch(
+                                        r"WorkBuddy(?:\s+\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?)?",
+                                        name.strip(), re.IGNORECASE):
+                                    continue
+                                # A stale InstallLocation must not mask a valid DisplayIcon.
+                                for field in ("InstallLocation", "DisplayIcon"):
+                                    path = _registry_runtime_path(
+                                        _registry_text(winreg, entry, field), icon=field == "DisplayIcon")
+                                    if path and ntpath.normcase(path) not in seen:
+                                        seen.add(ntpath.normcase(path))
+                                        if os.path.isfile(path):
+                                            yield path
+                        except OSError:
+                            # Deleted entries and access-denied subkeys are normal.
+                            continue
+            except OSError:
+                continue
+
+
 def find_workbuddy_runtime():
     override = os.environ.get("WORKBUDDY_EXE")
     if override:
@@ -420,6 +503,11 @@ def find_workbuddy_runtime():
     for path in candidates:
         if path and os.path.isfile(path) and (os.name == "nt" or os.access(path, os.X_OK)):
             return os.path.abspath(path)
+    if sys.platform == "win32":
+        with closing(_windows_registry_runtimes()) as entries:
+            registered = next(entries, None)
+        if registered:
+            return registered
     raise AuthError("RUNTIME_NOT_FOUND")
 
 
@@ -829,6 +917,57 @@ def dig(obj, key):
     return None
 
 
+def _api_success(code, body):
+    """同时检查 HTTP 状态和 JSON 业务码，避免把业务失败当作状态转换成功。"""
+    business_code = body.get("code") if isinstance(body, dict) else None
+    return 200 <= code < 300 and (
+        business_code is None or (type(business_code) is int and business_code == 0))
+
+
+def _makeup_candidates(streak_body, heatmap_body):
+    """从日历选断登日期；makeup_dates 是已补登历史，不能作为待办清单。
+
+    对齐官方成长中心：当月、今天之前、活动上线之后、score == 0。
+    使用 heatmap.today 的服务端日期，避免本机时区把月初/午夜算错。
+    日历缺项不推测为零；结构异常时整段停止，不能靠猜测消耗补登卡。
+    """
+    def parse_date(value):
+        if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
+            raise ValueError("补登日期格式无效")
+        return date.fromisoformat(value)
+
+    today_obj = dig(heatmap_body, "today")
+    if not isinstance(today_obj, dict):
+        raise ValueError("活跃日历缺少服务端日期")
+    today = parse_date(today_obj.get("date"))
+    launch = parse_date(dig(streak_body, "launch_date"))
+    start = max(today.replace(day=1), launch, date(2026, 6, 17))
+    streak = dig(streak_body, "streak")
+    if not isinstance(streak, dict):
+        raise ValueError("连登状态格式无效")
+    made_up = streak.get("makeup_dates", [])
+    if not isinstance(made_up, list):
+        raise ValueError("已补登记录格式无效")
+    made_up = {parse_date(value) for value in made_up}
+    cells = dig(heatmap_body, "cells")
+    if not isinstance(cells, list):
+        raise ValueError("活跃日历缺少日期列表")
+    scores = {}
+    for cell in cells:
+        if not isinstance(cell, dict):
+            raise ValueError("活跃日历记录格式无效")
+        day = parse_date(cell.get("date"))
+        score = cell.get("score")
+        if type(score) not in (int, float) or not math.isfinite(score) or score < 0:
+            raise ValueError("活跃日历分数无效")
+        if day in scores and scores[day] != score:
+            raise ValueError("活跃日历同一日期的记录冲突")
+        scores[day] = score
+    # 最近的断点优先，以便尽早恢复当前连登；每轮仍受 MAKEUP_MAX_PER_RUN 限制。
+    return sorted((day.isoformat() for day, score in scores.items()
+                   if start <= day < today and score == 0 and day not in made_up), reverse=True)
+
+
 def fmt_credit(v):
     """积分显示用：能转 int 就转，否则原样返回（OverflowError 同理，见 as_int）。"""
     try:
@@ -1032,7 +1171,7 @@ def _already_report(status, via=None):
 
 
 def run_growth(headers, endpoint):
-    """成长中心自动化：领旅行礼物→派 Buddy→领任务/领取新任务→补登→连登兑换→开盲盒→能量开 Buddy→汇报。
+    """成长中心自动化：领旅行礼物→领任务→补登→连登兑换→开盲盒→能量开 Buddy→派出→汇报。
 
     各子步骤单独 try，一段失败不影响其余领取；认证或权限拒绝时结束本轮。
     """
@@ -1047,18 +1186,25 @@ def run_growth(headers, endpoint):
         """已知业务 403 由调用方先处理，其余认证/权限拒绝结束本轮。"""
         return code in (401, 403)
 
-    def _note_http(code, body, label):
+    def _stop_for_auth(code):
+        # 派出已移到奖励领取之后；即使被拒，也必须保留本轮已到账的奖励。
+        out = _auth_failure(code)
+        out["report"] = "；".join(parts + [out["report"]])
+        out["credits_gained"] = credits_gained
+        return 1, out
+
+    def _note_http(code, body, label, required=False):
         """前置查询接口非 2xx 时的统一记录；返回 True 表示调用方应跳过后续处理。
 
         硬失败（5xx / 网络不可达 / 预算耗尽）必须计入 failures：否则整轮
         successes=0 且 failures=0 会被判成 idle，轮询既不写日志又返回 0，
         服务端故障彻底无声无息。旅行模块早就这么做了，其余各段没跟上。
 
-        4xx 只进报告、不计失败：绝大多数是业务规则（活动未开始、接口下线），
-        计入会让轮询天天强制落盘。手动跑 `growth` 仍能在报告里看到它。
+        一般查询的 4xx 只进报告、不计失败。影响写操作的前置查询用 required=True：
+        查询失败或业务码非零时必须提醒，不能把未知状态解释为可安全操作。
         """
         nonlocal failures, hard_failures
-        if 200 <= code < 300:
+        if 200 <= code < 300 and (not required or _api_success(code, body)):
             return False
         reason = _http_label(code)
         detail = ""
@@ -1068,12 +1214,15 @@ def run_growth(headers, endpoint):
         # 又看不出是网络还是服务端，轮询日志里这两者都想要
         parts.append("%s失败：%s" % (label, "%s（%s）" % (reason, detail)
                                      if detail and detail != reason else (detail or reason)))
-        if _is_hard_failure(code):
+        if required or _is_hard_failure(code):
             failures += 1
             hard_failures += 1
         return True
 
-    # --- 1. Buddy 旅行：领礼物 + 派出发 ---
+    # --- 1. Buddy 旅行：先领已有礼物，派出放到能量开 Buddy 之后 ---
+    # 开 Buddy 会覆盖旅行记录；只有明确 idle 才能开，状态未知也不能放行。
+    travel = None
+    daily_limit = False
     try:
         scode, sbody = get(base + "/buddy/travel/status", headers)
         if scode == CODE_BUDGET_OUT:
@@ -1085,57 +1234,38 @@ def run_growth(headers, endpoint):
                        "report": "网络不可达，成长中心跳过（%s）" % (sbody.get("error") or "")}
         if _check_auth(scode):
             return 1, _auth_failure(scode)
-        travel = dig(sbody, "state") if (200 <= scode < 300) else None
-        # 服务端明确给出"今日旅行名额已用完"。读它而不是等 depart 报错，
-        # 轮询场景下差别很大：后者会让每一轮都白撞一次墙。
-        daily_limit = bool(dig(sbody, "daily_limit_reached")) if (200 <= scode < 300) else False
-        _note_http(scode, sbody, "查旅行状态")
-        claimed_travel = False
+        if not _note_http(scode, sbody, "查旅行状态", required=True):
+            state = dig(sbody, "state")
+            if state in ("idle", "traveling", "arrived"):
+                travel = state
+                daily_limit = bool(dig(sbody, "daily_limit_reached"))
+            else:
+                parts.append("旅行状态无法识别，跳过开 Buddy 与派出")
+                failures += 1
+                hard_failures += 1
         if travel == "arrived":
             record_id = dig(sbody, "record_id")
             ccode, cbody = post(base + "/buddy/travel/claim", headers, {"record_id": record_id})
             if _check_auth(ccode):
                 return 1, _auth_failure(ccode)
-            if 200 <= ccode < 300 and dig(cbody, "reward_credit") is not None:
+            if _api_success(ccode, cbody) and dig(cbody, "reward_credit") is not None:
                 got = as_int(dig(cbody, "reward_credit"))
                 credits_gained += got
                 parts.append("领旅行礼物 +%s 积分" % fmt_credit(got))
                 successes += 1
-                claimed_travel = True
+                travel = "idle"  # 确认领取成功后，才允许开 Buddy 或派出。
             else:
                 # 领失败：带出业务 msg，不再说"HTTP 200"；也不派 Buddy 出发，避免覆盖未领取的奖励
                 msg = (dig(cbody, "msg") or "") if isinstance(cbody, dict) else ""
                 parts.append("领旅行礼物失败：%s" % (msg or "HTTP %s" % ccode))
                 failures += 1
                 hard_failures += _is_hard_failure(ccode)
-            if claimed_travel:
-                travel = "idle"  # 只有领取成功后才视为 idle，允许派出发
         if travel == "idle" and daily_limit:
             # 今日名额已用完：直接收手，不碰 config/depart，省掉两个请求和一条必然的失败
             parts.append("今日旅行名额已用完")
-        elif travel == "idle":
-            ccode, cbody = get(base + "/buddy/travel/config", headers)
-            if _check_auth(ccode):
-                return 1, _auth_failure(ccode)
-            locs = dig(cbody, "locations") if (200 <= ccode < 300) else None
-            if locs and isinstance(locs[0], dict):
-                loc = locs[0]
-                dcode, dbody = post(base + "/buddy/travel/depart", headers,
-                                    {"location_id": loc.get("id")})
-                if _check_auth(dcode):
-                    return 1, _auth_failure(dcode)
-                if 200 <= dcode < 300:
-                    loc_name = (dig(dbody, "location") or {}).get("name", "?")
-                    dur = dig(dbody, "duration_hours") or (dig(dbody, "location") or {}).get("duration_hours", "?")
-                    parts.append("派 Buddy 去%s（%s 小时后回）" % (loc_name, dur))
-                    successes += 1
-                else:
-                    msg = dig(dbody, "msg") or ""
-                    parts.append("派 Buddy 失败：%s" % (msg or "HTTP %s" % dcode))
-                    failures += 1
-                    hard_failures += _is_hard_failure(dcode)
         elif travel == "traveling":
-            loc_name = (dig(sbody, "location") or {}).get("name", "?")
+            location = dig(sbody, "location")
+            loc_name = location.get("name", "?") if isinstance(location, dict) else "?"
             # arrive_at / server_now 是服务端时间戳，比本地时钟可靠
             parts.append("Buddy 旅行中（%s%s）" % (
                 loc_name, _fmt_eta(dig(sbody, "arrive_at"), dig(sbody, "server_now"))))
@@ -1229,11 +1359,11 @@ def run_growth(headers, endpoint):
             hard_failures += 1
 
     # --- 3. 补登卡：断登自动补一张，保住连登 ---
-    # 官方规则：补登卡上限 4 张、仅可补救当月断登；/streak 的 makeup_dates
-    # 是服务端算好的可补日期。卡攒着不花，超上限后新卡也拿不到，断登优先补。
+    # 官方规则：补登卡上限 4 张、仅可补救当月断登。/streak 的 makeup_dates
+    # 是已经补登的日期；真正的断点来自 /heatmap 中 score == 0 的历史日期。
     # 放在连登兑换之前：补登会改变连登天数，先补，兑换才能拿到最新解锁状态。
-    # 注意：实测时 makeup_dates 一直是 []，这条写路径没有被真实响应验证过，
-    # 所以每轮最多补一张（见 MAKEUP_MAX_PER_RUN），万一形状猜错也只错一次。
+    # 2026-10-01 核对官方 GrowthCenterPage / AllTasksPage 与真实只读日历。
+    # 保留每轮最多一张、写请求不重试的限制；空白或异常数据不会触发补登。
     streak_body = None    # 复用给第 7 段的展示值，避免同一轮打两次 /streak
     streak_stale = False  # 补登成功会改变连签天数，此时必须重新取
     if _budget_left() <= 0:
@@ -1243,44 +1373,54 @@ def run_growth(headers, endpoint):
             mcode, mbody = get(base + "/streak", headers)
             if _check_auth(mcode):
                 return 1, _auth_failure(mcode)
-            if not _note_http(mcode, mbody, "查连登状态"):
+            if not _note_http(mcode, mbody, "查连登状态", required=True):
                 streak_body = mbody
                 # 余额兼容两种形状：{"makeup_cards":{"balance":2}} 与 {"makeup_cards":2}。
                 # 只认前者的话，接口是后者时整个补登会一声不响地永不执行。
                 cards_obj = dig(mbody, "makeup_cards")
                 cards = as_int(cards_obj.get("balance")) if isinstance(cards_obj, dict) \
                     else as_int(cards_obj)
-                # 实测 makeup_dates 在 streak 对象内部（不在顶层），当前值为 []；
-                # dig 只做顶层查找，这里手动下钻，两处都兜住以防接口调整。
-                streak_obj = dig(mbody, "streak") or {}
-                dates = (streak_obj.get("makeup_dates") if isinstance(streak_obj, dict) else None) \
-                    or dig(mbody, "makeup_dates") or []
-                if cards > 0 and isinstance(dates, list) and dates:
+                dates = []
+                if cards > 0:
+                    hcode, hbody = get(base + "/heatmap", headers)
+                    if _check_auth(hcode):
+                        return 1, _auth_failure(hcode)
+                    if not _note_http(hcode, hbody, "查补登日历", required=True):
+                        dates = _makeup_candidates(mbody, hbody)
+                if dates:
+                    made_up = 0
                     for d in dates[:min(cards, MAKEUP_MAX_PER_RUN)]:
                         if _budget_left() <= 0:
                             parts.append("时间预算耗尽，剩余补登下次再做")
                             break
                         ucode, ubody = post(base + "/makeup-cards/use", headers,
-                                            {"target_date": d, "client_token": _client_token()})
+                                            {"target_date": d})
                         if _check_auth(ucode):
                             return 1, _auth_failure(ucode)
-                        if 200 <= ucode < 300:
+                        if _api_success(ucode, ubody):
                             cards -= 1
+                            made_up += 1
                             streak_stale = True
                             # 优先报服务端给的余额，本地递减只是接口没给时的兜底
                             left_obj = dig(ubody, "makeup_cards")
                             left_cards = as_int(left_obj.get("balance"), cards) \
                                 if isinstance(left_obj, dict) else as_int(left_obj, cards)
                             parts.append("补登 %s（剩 %s 张卡）" % (d, left_cards))
+                            cards = max(0, left_cards)
                             successes += 1
                         else:
                             msg = dig(ubody, "msg") or ""
+                            if ucode == 400 and str(msg).strip().lower() == "date is not broken, no makeup needed":
+                                # 查询后被客户端或另一轮补上，是正常竞争；不再当作失败刷日志。
+                                parts.append("%s 已活跃或已补登，无需再次补登" % d)
+                                break
                             parts.append("补登 %s 失败：%s" % (d, msg or "HTTP %s" % ucode))
                             failures += 1
-                            hard_failures += _is_hard_failure(ucode)
-                    if len(dates) > MAKEUP_MAX_PER_RUN and cards > 0:
+                            hard_failures += 1
+                            break
+                    if made_up and len(dates) > made_up and cards > 0:
                         parts.append("另有 %s 天可补、剩 %s 张卡，下轮继续" % (
-                            len(dates) - MAKEUP_MAX_PER_RUN, cards))
+                            len(dates) - made_up, cards))
         except Exception as e:
             parts.append("补登模块异常（%s: %s）" % (type(e).__name__, e))
             failures += 1
@@ -1388,7 +1528,10 @@ def run_growth(headers, endpoint):
             hard_failures += 1
 
     # --- 6. Buddy 盲盒（能量攒够 cost_per_open 就开；能量没有其它消耗出口）---
-    if _budget_left() <= 0:
+    if travel != "idle":
+        parts.append("Buddy 盲盒跳过：%s" % (
+            "旅行尚未结束或礼物尚未领到" if travel in ("traveling", "arrived") else "旅行状态未知"))
+    elif _budget_left() <= 0:
         parts.append("时间预算耗尽，Buddy 盲盒跳过")
     else:
         try:
@@ -1419,6 +1562,41 @@ def run_growth(headers, endpoint):
             parts.append("Buddy 盲盒模块异常（%s: %s）" % (type(e).__name__, e))
             failures += 1
             hard_failures += 1
+
+    # --- 6b. 最后派出：既不覆盖在途礼物，也让每天只跑一次的用户有机会开 Buddy ---
+    if travel == "idle" and not daily_limit:
+        if _budget_left() <= 0:
+            parts.append("时间预算耗尽，派 Buddy 跳过")
+        else:
+            try:
+                ccode, cbody = get(base + "/buddy/travel/config", headers)
+                if _check_auth(ccode):
+                    return _stop_for_auth(ccode)
+                if not _note_http(ccode, cbody, "查旅行配置", required=True):
+                    locs = dig(cbody, "locations")
+                    if locs and isinstance(locs[0], dict):
+                        dcode, dbody = post(base + "/buddy/travel/depart", headers,
+                                            {"location_id": locs[0].get("id")})
+                        msg = str(dig(dbody, "msg") or "")
+                        if dcode == 403 and msg.strip().lower() == "no active buddy":
+                            parts.append("派 Buddy 跳过：尚未领养 Buddy")
+                        elif _check_auth(dcode):
+                            return _stop_for_auth(dcode)
+                        elif _api_success(dcode, dbody):
+                            location = dig(dbody, "location")
+                            location = location if isinstance(location, dict) else {}
+                            loc_name = location.get("name", "?")
+                            dur = dig(dbody, "duration_hours") or location.get("duration_hours", "?")
+                            parts.append("派 Buddy 去%s（%s 小时后回）" % (loc_name, dur))
+                            successes += 1
+                        else:
+                            parts.append("派 Buddy 失败：%s" % (msg or "HTTP %s" % dcode))
+                            failures += 1
+                            hard_failures += _is_hard_failure(dcode)
+            except Exception as e:
+                parts.append("派 Buddy 模块异常（%s: %s）" % (type(e).__name__, e))
+                failures += 1
+                hard_failures += 1
 
     # --- 7. 能量 & 连签状态（纯展示值，预算不够就直接不取，不计失败）---
     energy = None
@@ -1462,9 +1640,9 @@ def run_growth(headers, endpoint):
     if tail:
         report += "（%s）" % "，".join(tail)
 
-    # 只有"确有需要关注的失败且一件都没成"才算整体失败。
-    # 派 Buddy 已达每日上限这类 4xx 是每天的常态，不能让计划任务天天报红。
-    result_code = 1 if (hard_failures and not successes) else 0
+    # 已获得的奖励仍保留在汇报里，但不能掩盖其他步骤需要处理的失败。
+    # 已识别的正常业务状态（如旅行名额用完、日期无需补登）不会计入 hard_failures。
+    result_code = 1 if hard_failures else 0
     # idle = 这一轮既没领到东西也没出错，纯空跑（Buddy 还在路上 / 今日名额已用完 /
     # 确实没有可领项）。轮询任务靠它决定要不要写日志。
     idle = (successes == 0 and failures == 0)
@@ -1601,10 +1779,9 @@ def run_daily(headers, endpoint):
                           "report": "成长中心异常（%s: %s）" % (type(e).__name__, e)}
     out["growth"] = gout.get("report")
     out["growth_result"] = gout.get("result")
-    if gout.get("credits_gained"):
+    if gout.get("credits_gained") or gcode != 0:
         out["report"] += "；" + gout["report"]
-    # run_growth 只在"确有硬失败且一件都没成"时返回非 0（无可领取项、4xx 业务规则
-    # 均返回 0），直接透传即可——之前按 result 枚举漏了 result=GROWTH 的整体失败
+    # 成长中心有需要处理的失败即返回非零；保留签到成功结果，同时透传提醒。
     if gcode != 0 and code == 0:
         code = gcode
     out["needs_attention"] = code != 0
